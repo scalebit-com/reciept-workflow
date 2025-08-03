@@ -1,9 +1,14 @@
 #!/bin/bash
 
 # Docker image configuration
-GETGMAIL_IMAGE="perarneng/getgmail:1.1.0"
-HTML2PDF_IMAGE="perarneng/html2pdf:1.0.0"
+GETGMAIL_IMAGE="perarneng/getgmail:1.2.0"
+HTML2PDF_IMAGE="perarneng/html2pdf:1.1.0"
 MARKITDOWN_IMAGE="astral/uv:bookworm-slim"
+
+# Folder name configuration
+MAIL_FOLDER_NAME="mail"
+PDF_FOLDER_NAME="pdf"
+MARKDOWN_FOLDER_NAME="markdown"
 
 # ANSI color codes
 RED='\033[0;31m'
@@ -131,16 +136,18 @@ parse_args() {
 
 # Download emails using getgmail
 download_emails() {
-    _log_info "Creating output directory: $OUTPUT_DIR"
-    mkdir -p "$OUTPUT_DIR"
+    local mail_dir="$OUTPUT_DIR/$MAIL_FOLDER_NAME"
     
-    _log_info "Downloading $COUNT emails to $OUTPUT_DIR using $GETGMAIL_IMAGE"
+    _log_info "Creating output directory: $mail_dir"
+    mkdir -p "$mail_dir"
+    
+    _log_info "Downloading $COUNT emails to $mail_dir using $GETGMAIL_IMAGE"
     
     docker run --rm \
         -v "$(pwd):/app/data" \
         -e GOOGLE_CREDENTIALS_FILE=/app/data/credentials.json \
         -e GOOGLE_TOKEN_FILE=/app/data/token.json \
-        "$GETGMAIL_IMAGE" download -d "/app/data/$OUTPUT_DIR" -m INBOX -c "$COUNT"
+        "$GETGMAIL_IMAGE" download -d "/app/data/$mail_dir" -m INBOX -c "$COUNT"
     
     if [[ $? -eq 0 ]]; then
         _log_info "Email download completed successfully"
@@ -152,10 +159,12 @@ download_emails() {
 
 # Convert HTML files to PDF using html2pdf
 convert_to_pdf() {
+    local mail_dir="$OUTPUT_DIR/$MAIL_FOLDER_NAME"
+    
     _log_info "Converting HTML files to PDF using $HTML2PDF_IMAGE"
     
     docker run --rm \
-        -v "$(pwd)/$OUTPUT_DIR:/app/data" \
+        -v "$(pwd)/$mail_dir:/app/data" \
         "$HTML2PDF_IMAGE" recurse -d . --skip-html-extension
     
     if [[ $? -eq 0 ]]; then
@@ -168,18 +177,19 @@ convert_to_pdf() {
 
 # Collect all PDF files into a single directory
 collect_all_pdfs() {
-    local all_pdfs_dir="$OUTPUT_DIR/all_pdfs"
+    local all_pdfs_dir="$OUTPUT_DIR/$PDF_FOLDER_NAME"
+    local mail_dir="$OUTPUT_DIR/$MAIL_FOLDER_NAME"
     
     _log_info "Collecting all PDF files into $all_pdfs_dir"
     
     # Create the all_pdfs directory if it doesn't exist
     mkdir -p "$all_pdfs_dir"
     
-    # Find all PDF files recursively in the output directory (excluding the all_pdfs directory itself)
+    # Find all PDF files recursively in the mail directory (excluding the pdf directory itself)
     local pdf_count=0
     while IFS= read -r -d '' pdf_file; do
-        # Skip files that are already in the all_pdfs directory
-        if [[ "$pdf_file" == *"/all_pdfs/"* ]]; then
+        # Skip files that are already in the pdf directory
+        if [[ "$pdf_file" == *"/$PDF_FOLDER_NAME/"* ]]; then
             continue
         fi
         
@@ -187,24 +197,39 @@ collect_all_pdfs() {
         local pdf_basename=$(basename "$pdf_file")
         local dest_file="$all_pdfs_dir/$pdf_basename"
         
-        # Handle filename conflicts by adding a number suffix
-        local counter=1
-        local original_basename="$pdf_basename"
-        while [[ -f "$dest_file" ]]; do
-            local name_without_ext="${original_basename%.pdf}"
-            dest_file="$all_pdfs_dir/${name_without_ext}_${counter}.pdf"
-            ((counter++))
-        done
+        # Check if destination file already exists
+        if [[ -f "$dest_file" ]]; then
+            # Compare file sizes first (quick check)
+            local src_size=$(stat -f%z "$pdf_file" 2>/dev/null || stat -c%s "$pdf_file" 2>/dev/null)
+            local dest_size=$(stat -f%z "$dest_file" 2>/dev/null || stat -c%s "$dest_file" 2>/dev/null)
+            
+            if [[ "$src_size" == "$dest_size" ]]; then
+                # If sizes match, do a full comparison
+                if cmp -s "$pdf_file" "$dest_file"; then
+                    _log_info "Skipped (identical file exists): $(basename "$pdf_file")"
+                    continue
+                fi
+            fi
+            
+            # Files are different, need to find a new name
+            local counter=1
+            local original_basename="$pdf_basename"
+            while [[ -f "$dest_file" ]]; do
+                local name_without_ext="${original_basename%.pdf}"
+                dest_file="$all_pdfs_dir/${name_without_ext}_${counter}.pdf"
+                ((counter++))
+            done
+        fi
         
         # Copy the PDF file
         cp "$pdf_file" "$dest_file"
         if [[ $? -eq 0 ]]; then
-            _log_info "Copied: $(basename "$pdf_file") -> all_pdfs/$(basename "$dest_file")"
+            _log_info "Copied: $(basename "$pdf_file") -> $PDF_FOLDER_NAME/$(basename "$dest_file")"
             ((pdf_count++))
         else
             _log_warn "Failed to copy: $pdf_file"
         fi
-    done < <(find "$OUTPUT_DIR" -name "*.pdf" -type f -print0)
+    done < <(find "$mail_dir" -name "*.pdf" -type f -print0)
     
     if [[ $pdf_count -eq 0 ]]; then
         _log_warn "No PDF files found to collect"
@@ -216,7 +241,7 @@ collect_all_pdfs() {
 # Convert PDF files to Markdown using markitdown
 pdf2markdown() {
     local pdf_dir="$1"
-    local md_dir="$OUTPUT_DIR/all_mds"
+    local md_dir="$OUTPUT_DIR/$MARKDOWN_FOLDER_NAME"
     
     _log_info "Converting PDF files to Markdown from $pdf_dir using $MARKITDOWN_IMAGE"
     _log_info "Output directory: $md_dir"
@@ -227,7 +252,7 @@ pdf2markdown() {
         return 1
     fi
     
-    # Create the all_mds directory if it doesn't exist
+    # Create the markdown directory if it doesn't exist
     mkdir -p "$md_dir"
     
     # Find all PDF files in the directory
@@ -241,7 +266,21 @@ pdf2markdown() {
         local pdf_basename=$(basename "$pdf_file" .pdf)
         local md_file="$md_dir/${pdf_basename}.md"
         
-        _log_info "Converting: $(basename "$pdf_file") -> all_mds/$(basename "$md_file")"
+        # Check if markdown file already exists
+        if [[ -f "$md_file" ]] && [[ -s "$md_file" ]]; then
+            # Get the PDF file modification time
+            local pdf_mtime=$(stat -f%m "$pdf_file" 2>/dev/null || stat -c%Y "$pdf_file" 2>/dev/null)
+            local md_mtime=$(stat -f%m "$md_file" 2>/dev/null || stat -c%Y "$md_file" 2>/dev/null)
+            
+            # If markdown file is newer than PDF, skip conversion
+            if [[ "$md_mtime" -ge "$pdf_mtime" ]]; then
+                _log_info "Skipped (up-to-date): $(basename "$pdf_file")"
+                ((converted_count++))
+                continue
+            fi
+        fi
+        
+        _log_info "Converting: $(basename "$pdf_file") -> $MARKDOWN_FOLDER_NAME/$(basename "$md_file")"
         
         # Run markitdown via Docker with PDF dependencies and capture both stdout and stderr
         local error_output
@@ -283,7 +322,7 @@ main() {
     download_emails
     convert_to_pdf
     collect_all_pdfs
-    pdf2markdown "$OUTPUT_DIR/all_pdfs"
+    pdf2markdown "$OUTPUT_DIR/$PDF_FOLDER_NAME"
     
     _log_info "Receipt processing workflow completed successfully"
     _log_info "Output directory: $OUTPUT_DIR"
