@@ -56,8 +56,9 @@ output/
 │   ├── *_body.pdf                        # Converted PDF
 │   ├── *_metadata.txt                    # Email metadata
 │   └── *_attachment.pdf                  # Original attachments
-└── all_pdfs/                             # Consolidated PDF collection
-    ├── *.pdf                             # All PDFs in one location
+├── all_pdfs/                             # Consolidated PDF collection
+│   └── *.pdf                             # All PDFs in one location
+└── all_mds/                              # Consolidated markdown collection
     └── *.md                              # Markdown text extractions
 ```
 

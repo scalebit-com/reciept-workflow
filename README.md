@@ -74,9 +74,10 @@ output/
 │   └── *_Receipt-123.pdf        # Email attachments
 ├── 2025-08-01_17-08-55_Google-Workspace-Invoice/
 │   └── ...
-└── all_pdfs/                    # Consolidated collection
-    ├── *.pdf                    # All PDFs in one place
-    └── *.md                     # Markdown extractions
+├── all_pdfs/                    # Consolidated PDF collection
+│   └── *.pdf                    # All PDFs in one place
+└── all_mds/                     # Consolidated markdown collection
+    └── *.md                     # Markdown text extractions
 ```
 
 ## Workflow Stages
