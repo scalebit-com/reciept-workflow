@@ -1,0 +1,6 @@
+# Credential files
+token.json
+credentials.json
+
+# Output directory
+output/
