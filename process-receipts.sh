@@ -216,14 +216,19 @@ collect_all_pdfs() {
 # Convert PDF files to Markdown using markitdown
 pdf2markdown() {
     local pdf_dir="$1"
+    local md_dir="$OUTPUT_DIR/all_mds"
     
-    _log_info "Converting PDF files to Markdown in $pdf_dir using $MARKITDOWN_IMAGE"
+    _log_info "Converting PDF files to Markdown from $pdf_dir using $MARKITDOWN_IMAGE"
+    _log_info "Output directory: $md_dir"
     
-    # Check if the directory exists
+    # Check if the PDF directory exists
     if [[ ! -d "$pdf_dir" ]]; then
         _log_err "PDF directory does not exist: $pdf_dir"
         return 1
     fi
+    
+    # Create the all_mds directory if it doesn't exist
+    mkdir -p "$md_dir"
     
     # Find all PDF files in the directory
     local pdf_count=0
@@ -234,9 +239,9 @@ pdf2markdown() {
         
         # Get the basename without extension
         local pdf_basename=$(basename "$pdf_file" .pdf)
-        local md_file="$(dirname "$pdf_file")/${pdf_basename}.md"
+        local md_file="$md_dir/${pdf_basename}.md"
         
-        _log_info "Converting: $(basename "$pdf_file") -> $(basename "$md_file")"
+        _log_info "Converting: $(basename "$pdf_file") -> all_mds/$(basename "$md_file")"
         
         # Run markitdown via Docker with PDF dependencies and capture both stdout and stderr
         local error_output
@@ -264,6 +269,7 @@ pdf2markdown() {
         _log_warn "No PDF files found in $pdf_dir"
     else
         _log_info "PDF to Markdown conversion completed: $converted_count/$pdf_count files converted successfully"
+        _log_info "Markdown files saved to: $md_dir"
     fi
 }
 
