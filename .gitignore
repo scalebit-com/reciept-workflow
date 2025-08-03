@@ -4,3 +4,6 @@ credentials.json
 
 # Output directory
 output/
+
+.env
+.DS_Store

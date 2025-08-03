@@ -4,11 +4,15 @@
 GETGMAIL_IMAGE="perarneng/getgmail:1.2.0"
 HTML2PDF_IMAGE="perarneng/html2pdf:1.1.0"
 MARKITDOWN_IMAGE="astral/uv:bookworm-slim"
+RECEIPT_AI_IMAGE="perarneng/reciept-invoice-ai-tool:2.1.0"
 
 # Folder name configuration
 MAIL_FOLDER_NAME="mail"
 PDF_FOLDER_NAME="pdf"
 MARKDOWN_FOLDER_NAME="markdown"
+JSON_FOLDER_NAME="json"
+HTML_OVERVIEW_FOLDER_NAME="html-overview"
+PDF_OVERVIEW_FOLDER_NAME="pdf-overview"
 
 # ANSI color codes
 RED='\033[0;31m'
@@ -159,18 +163,58 @@ download_emails() {
 
 # Convert HTML files to PDF using html2pdf
 convert_to_pdf() {
-    local mail_dir="$OUTPUT_DIR/$MAIL_FOLDER_NAME"
+    local target_dir="$1"
+    local skip_if_exists_in_dest="$2"  # Optional parameter for destination directory to check
     
-    _log_info "Converting HTML files to PDF using $HTML2PDF_IMAGE"
+    if [[ -z "$target_dir" ]]; then
+        _log_err "convert_to_pdf requires a target directory parameter"
+        exit 1
+    fi
+    
+    _log_info "Converting HTML files to PDF in $target_dir using $HTML2PDF_IMAGE"
+    
+    # Check if the target directory exists
+    if [[ ! -d "$target_dir" ]]; then
+        _log_err "Target directory does not exist: $target_dir"
+        return 1
+    fi
+    
+    # If skip_if_exists_in_dest is provided, check if PDFs already exist there
+    if [[ -n "$skip_if_exists_in_dest" ]] && [[ -d "$skip_if_exists_in_dest" ]]; then
+        _log_info "Checking for existing PDFs in $skip_if_exists_in_dest before generating"
+        
+        # Find HTML files and check if corresponding PDFs already exist in destination
+        local html_files_to_process=0
+        local html_files_skipped=0
+        
+        while IFS= read -r -d '' html_file; do
+            local html_basename=$(basename "$html_file" .html)
+            local dest_pdf="$skip_if_exists_in_dest/${html_basename}.pdf"
+            
+            if [[ -f "$dest_pdf" ]]; then
+                _log_info "PDF already exists in destination, skipping HTML conversion: $(basename "$html_file")"
+                ((html_files_skipped++))
+            else
+                ((html_files_to_process++))
+            fi
+        done < <(find "$target_dir" -name "*.html" -type f -print0)
+        
+        if [[ $html_files_to_process -eq 0 ]]; then
+            _log_info "All HTML files already have corresponding PDFs in destination, skipping conversion"
+            return 0
+        fi
+        
+        _log_info "Processing $html_files_to_process HTML files ($html_files_skipped already exist in destination)"
+    fi
     
     docker run --rm \
-        -v "$(pwd)/$mail_dir:/app/data" \
+        -v "$(pwd)/$target_dir:/app/data" \
         "$HTML2PDF_IMAGE" recurse -d . --skip-html-extension
     
     if [[ $? -eq 0 ]]; then
-        _log_info "PDF conversion completed successfully"
+        _log_info "PDF conversion completed successfully for $target_dir"
     else
-        _log_err "PDF conversion failed"
+        _log_err "PDF conversion failed for $target_dir"
         exit 1
     fi
 }
@@ -312,6 +356,199 @@ pdf2markdown() {
     fi
 }
 
+# Extract JSON information from Markdown files using reciept-invoice-ai-tool
+extract_json_info() {
+    local md_dir="$OUTPUT_DIR/$MARKDOWN_FOLDER_NAME"
+    local json_dir="$OUTPUT_DIR/$JSON_FOLDER_NAME"
+    
+    _log_info "Extracting JSON information from Markdown files in $md_dir using $RECEIPT_AI_IMAGE"
+    _log_info "Output directory: $json_dir"
+    
+    # Check if the markdown directory exists
+    if [[ ! -d "$md_dir" ]]; then
+        _log_err "Markdown directory does not exist: $md_dir"
+        return 1
+    fi
+    
+    # Create the JSON directory if it doesn't exist
+    mkdir -p "$json_dir"
+    
+    # Find all Markdown files in the directory
+    local md_count=0
+    local extracted_count=0
+    
+    while IFS= read -r -d '' md_file; do
+        ((md_count++))
+        
+        # Get the basename without extension
+        local md_basename=$(basename "$md_file" .md)
+        local json_file="$json_dir/${md_basename}.json"
+        
+        # Check if JSON file already exists
+        if [[ -f "$json_file" ]] && [[ -s "$json_file" ]]; then
+            # Get the markdown file modification time
+            local md_mtime=$(stat -f%m "$md_file" 2>/dev/null || stat -c%Y "$md_file" 2>/dev/null)
+            local json_mtime=$(stat -f%m "$json_file" 2>/dev/null || stat -c%Y "$json_file" 2>/dev/null)
+            
+            # If JSON file is newer than markdown, skip extraction
+            if [[ "$json_mtime" -ge "$md_mtime" ]]; then
+                _log_info "Skipped (up-to-date): $(basename "$md_file")"
+                ((extracted_count++))
+                continue
+            fi
+        fi
+        
+        _log_info "Extracting: $(basename "$md_file") -> $JSON_FOLDER_NAME/$(basename "$json_file")"
+        
+        # Run reciept-invoice-ai-tool via Docker
+        docker run --rm \
+            -v "$(pwd):/app/data" \
+            -v "$(pwd)/.env:/app/.env:ro" \
+            "$RECEIPT_AI_IMAGE" \
+            extract -i "/app/data/$md_file" -o "/app/data/$json_file"
+        
+        if [[ $? -eq 0 ]] && [[ -s "$json_file" ]]; then
+            _log_info "Successfully extracted: $(basename "$md_file")"
+            ((extracted_count++))
+        else
+            _log_err "Failed to extract: $(basename "$md_file")"
+            # Remove empty or failed JSON file
+            rm -f "$json_file"
+            exit 1
+        fi
+    done < <(find "$md_dir" -name "*.md" -type f -print0)
+    
+    if [[ $md_count -eq 0 ]]; then
+        _log_warn "No Markdown files found in $md_dir"
+    else
+        _log_info "JSON extraction completed: $extracted_count/$md_count files extracted successfully"
+        _log_info "JSON files saved to: $json_dir"
+    fi
+}
+
+# Generate HTML overview reports from JSON files using reciept-invoice-ai-tool
+render_html_overview() {
+    local json_dir="$OUTPUT_DIR/$JSON_FOLDER_NAME"
+    local html_dir="$OUTPUT_DIR/$HTML_OVERVIEW_FOLDER_NAME"
+    
+    _log_info "Generating HTML overview reports from JSON files in $json_dir using $RECEIPT_AI_IMAGE"
+    _log_info "Output directory: $html_dir"
+    
+    # Check if the JSON directory exists
+    if [[ ! -d "$json_dir" ]]; then
+        _log_err "JSON directory does not exist: $json_dir"
+        return 1
+    fi
+    
+    # Create the HTML overview directory if it doesn't exist
+    mkdir -p "$html_dir"
+    
+    # Find all JSON files in the directory
+    local json_count=0
+    local rendered_count=0
+    
+    while IFS= read -r -d '' json_file; do
+        ((json_count++))
+        
+        # Get the basename without extension
+        local json_basename=$(basename "$json_file" .json)
+        local html_file="$html_dir/${json_basename}.html"
+        
+        # Check if HTML file already exists
+        if [[ -f "$html_file" ]] && [[ -s "$html_file" ]]; then
+            # Get the JSON file modification time
+            local json_mtime=$(stat -f%m "$json_file" 2>/dev/null || stat -c%Y "$json_file" 2>/dev/null)
+            local html_mtime=$(stat -f%m "$html_file" 2>/dev/null || stat -c%Y "$html_file" 2>/dev/null)
+            
+            # If HTML file is newer than JSON, skip rendering
+            if [[ "$html_mtime" -ge "$json_mtime" ]]; then
+                _log_info "Skipped (up-to-date): $(basename "$json_file")"
+                ((rendered_count++))
+                continue
+            fi
+        fi
+        
+        _log_info "Rendering: $(basename "$json_file") -> $HTML_OVERVIEW_FOLDER_NAME/$(basename "$html_file")"
+        
+        # Run reciept-invoice-ai-tool htmloverview via Docker
+        docker run --rm \
+            -v "$(pwd):/app/data" \
+            -v "$(pwd)/.env:/app/.env:ro" \
+            "$RECEIPT_AI_IMAGE" \
+            htmloverview -i "/app/data/$json_file" -o "/app/data/$html_file"
+        
+        if [[ $? -eq 0 ]] && [[ -s "$html_file" ]]; then
+            _log_info "Successfully rendered: $(basename "$json_file")"
+            ((rendered_count++))
+        else
+            _log_err "Failed to render: $(basename "$json_file")"
+            # Remove empty or failed HTML file
+            rm -f "$html_file"
+            exit 1
+        fi
+    done < <(find "$json_dir" -name "*.json" -type f -print0)
+    
+    if [[ $json_count -eq 0 ]]; then
+        _log_warn "No JSON files found in $json_dir"
+    else
+        _log_info "HTML overview generation completed: $rendered_count/$json_count files rendered successfully"
+        _log_info "HTML files saved to: $html_dir"
+    fi
+}
+
+# Move PDF overview files from html-overview to pdf-overview folder
+move_pdf_overview_files() {
+    local source_dir="$OUTPUT_DIR/$HTML_OVERVIEW_FOLDER_NAME"
+    local dest_dir="$OUTPUT_DIR/$PDF_OVERVIEW_FOLDER_NAME"
+    
+    _log_info "Moving PDF overview files from $source_dir to $dest_dir"
+    
+    # Check if the source directory exists
+    if [[ ! -d "$source_dir" ]]; then
+        _log_err "Source directory does not exist: $source_dir"
+        return 1
+    fi
+    
+    # Create the destination directory if it doesn't exist
+    mkdir -p "$dest_dir"
+    
+    # Find all PDF files in the source directory
+    local pdf_count=0
+    local moved_count=0
+    
+    while IFS= read -r -d '' pdf_file; do
+        ((pdf_count++))
+        
+        # Get the basename of the PDF file
+        local pdf_basename=$(basename "$pdf_file")
+        local dest_file="$dest_dir/$pdf_basename"
+        
+        # Check if destination file already exists
+        if [[ -f "$dest_file" ]]; then
+            _log_warn "PDF overview file already exists in destination, removing source: $pdf_basename"
+            rm -f "$pdf_file"
+            continue
+        fi
+        
+        # Move the PDF file
+        mv "$pdf_file" "$dest_file"
+        if [[ $? -eq 0 ]]; then
+            _log_info "Moved PDF overview: $pdf_basename -> $PDF_OVERVIEW_FOLDER_NAME/"
+            ((moved_count++))
+        else
+            _log_err "Failed to move PDF overview: $pdf_file"
+            exit 1
+        fi
+    done < <(find "$source_dir" -name "*.pdf" -type f -print0)
+    
+    if [[ $pdf_count -eq 0 ]]; then
+        _log_warn "No PDF files found in $source_dir"
+    else
+        _log_info "PDF overview move completed: $moved_count/$pdf_count files moved successfully"
+        _log_info "PDF overview files saved to: $dest_dir"
+    fi
+}
+
 # Main execution
 main() {
     _log_info "Starting receipt processing workflow"
@@ -320,9 +557,13 @@ main() {
     check_docker
     check_required_files
     download_emails
-    convert_to_pdf
+    convert_to_pdf "$OUTPUT_DIR/$MAIL_FOLDER_NAME"
     collect_all_pdfs
     pdf2markdown "$OUTPUT_DIR/$PDF_FOLDER_NAME"
+    extract_json_info
+    render_html_overview
+    convert_to_pdf "$OUTPUT_DIR/$HTML_OVERVIEW_FOLDER_NAME" "$OUTPUT_DIR/$PDF_OVERVIEW_FOLDER_NAME"
+    move_pdf_overview_files
     
     _log_info "Receipt processing workflow completed successfully"
     _log_info "Output directory: $OUTPUT_DIR"
