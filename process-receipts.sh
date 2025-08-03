@@ -13,6 +13,7 @@ MARKDOWN_FOLDER_NAME="markdown"
 JSON_FOLDER_NAME="json"
 HTML_OVERVIEW_FOLDER_NAME="html-overview"
 PDF_OVERVIEW_FOLDER_NAME="pdf-overview"
+RECEIPTS_INVOICES_FOLDER_NAME="receipts_and_invoices"
 
 # ANSI color codes
 RED='\033[0;31m'
@@ -549,6 +550,127 @@ move_pdf_overview_files() {
     fi
 }
 
+# Consolidate receipts and invoices by combining overview and original PDFs
+consolidate_pdf_receipts() {
+    local json_dir="$OUTPUT_DIR/$JSON_FOLDER_NAME"
+    local pdf_dir="$OUTPUT_DIR/$PDF_FOLDER_NAME"
+    local overview_dir="$OUTPUT_DIR/$PDF_OVERVIEW_FOLDER_NAME"
+    local receipts_dir="$OUTPUT_DIR/$RECEIPTS_INVOICES_FOLDER_NAME"
+    
+    _log_info "Consolidating PDF receipts and invoices from $json_dir"
+    _log_info "Output directory: $receipts_dir"
+    
+    # Check if required directories exist
+    if [[ ! -d "$json_dir" ]]; then
+        _log_err "JSON directory does not exist: $json_dir"
+        return 1
+    fi
+    
+    if [[ ! -d "$pdf_dir" ]]; then
+        _log_err "PDF directory does not exist: $pdf_dir"
+        return 1
+    fi
+    
+    if [[ ! -d "$overview_dir" ]]; then
+        _log_err "PDF overview directory does not exist: $overview_dir"
+        return 1
+    fi
+    
+    # Create the receipts and invoices directory if it doesn't exist
+    mkdir -p "$receipts_dir"
+    
+    # Check if yq command is available
+    if ! command -v yq &> /dev/null; then
+        _log_err "yq command is not available. Please install yq to use this function."
+        return 1
+    fi
+    
+    # Check if pdfunite command is available
+    if ! command -v pdfunite &> /dev/null; then
+        _log_err "pdfunite command is not available. Please install poppler-utils to use this function."
+        return 1
+    fi
+    
+    # Find all JSON files in the directory
+    local json_count=0
+    local processed_count=0
+    local skipped_count=0
+    
+    while IFS= read -r -d '' json_file; do
+        ((json_count++))
+        
+        # Get the basename without extension
+        local json_basename=$(basename "$json_file" .json)
+        
+        # Check if document_type is not "None"
+        local document_type=$(yq -r '.document_type' "$json_file" 2>/dev/null)
+        
+        if [[ -z "$document_type" ]] || [[ "$document_type" == "null" ]] || [[ "$document_type" == "None" ]]; then
+            _log_info "Skipped (not a receipt/invoice): $(basename "$json_file") - document_type: $document_type"
+            ((skipped_count++))
+            continue
+        fi
+        
+        # Extract suggested filename
+        local suggested_filename=$(yq -r '.suggested_filename' "$json_file" 2>/dev/null)
+        
+        if [[ -z "$suggested_filename" ]] || [[ "$suggested_filename" == "null" ]]; then
+            _log_warn "Skipped (no suggested filename): $(basename "$json_file")"
+            ((skipped_count++))
+            continue
+        fi
+        
+        # Create target filename with .pdf extension
+        local target_file="$receipts_dir/${suggested_filename}.pdf"
+        
+        # Check if target file already exists
+        if [[ -f "$target_file" ]]; then
+            _log_warn "Target file already exists, skipping: $(basename "$target_file")"
+            ((skipped_count++))
+            continue
+        fi
+        
+        # Find corresponding PDF files
+        local overview_pdf="$overview_dir/${json_basename}.pdf"
+        local original_pdf="$pdf_dir/${json_basename}.pdf"
+        
+        # Check if both PDF files exist
+        if [[ ! -f "$overview_pdf" ]]; then
+            _log_warn "Overview PDF not found, skipping: $overview_pdf"
+            ((skipped_count++))
+            continue
+        fi
+        
+        if [[ ! -f "$original_pdf" ]]; then
+            _log_warn "Original PDF not found, skipping: $original_pdf"
+            ((skipped_count++))
+            continue
+        fi
+        
+        _log_info "Consolidating: $(basename "$json_file") -> $RECEIPTS_INVOICES_FOLDER_NAME/$(basename "$target_file")"
+        
+        # Combine PDFs with overview first (as cover page), then original
+        pdfunite "$overview_pdf" "$original_pdf" "$target_file"
+        
+        if [[ $? -eq 0 ]] && [[ -f "$target_file" ]]; then
+            _log_info "Successfully consolidated: $(basename "$target_file")"
+            ((processed_count++))
+        else
+            _log_err "Failed to consolidate: $(basename "$json_file")"
+            # Remove failed target file if it exists
+            rm -f "$target_file"
+            exit 1
+        fi
+    done < <(find "$json_dir" -name "*.json" -type f -print0)
+    
+    if [[ $json_count -eq 0 ]]; then
+        _log_warn "No JSON files found in $json_dir"
+    else
+        _log_info "PDF consolidation completed: $processed_count processed, $skipped_count skipped out of $json_count total files"
+        _log_info "Consolidated files saved to: $receipts_dir"
+    fi
+}
+
 # Main execution
 main() {
     _log_info "Starting receipt processing workflow"
@@ -564,6 +686,7 @@ main() {
     render_html_overview
     convert_to_pdf "$OUTPUT_DIR/$HTML_OVERVIEW_FOLDER_NAME" "$OUTPUT_DIR/$PDF_OVERVIEW_FOLDER_NAME"
     move_pdf_overview_files
+    consolidate_pdf_receipts
     
     _log_info "Receipt processing workflow completed successfully"
     _log_info "Output directory: $OUTPUT_DIR"
