@@ -2,7 +2,7 @@
 
 # Docker image configuration
 GETGMAIL_IMAGE="perarneng/getgmail:1.5.0"
-HTML2PDF_IMAGE="perarneng/html2pdf:1.1.0"
+HTML2PDF_IMAGE="perarneng/html2pdf:1.2.0"
 MARKITDOWN_IMAGE="astral/uv:bookworm-slim"
 RECEIPT_AI_IMAGE="perarneng/reciept-invoice-ai-tool:2.1.0"
 
